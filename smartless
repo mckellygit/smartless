@@ -6,6 +6,11 @@
 # document is short
 # inspired by code at http://unix.stackexchange.com/questions/107315/
 
+# NOTE: why cant we use -F arg to less instead of smartless ?
+# Add mouse scrolling support in less (does not work with older versions of "less")
+# dont use -F without -X - and with -X there is no mouse support ...
+# is this still the case with current version of less ?
+
 # ------------------------------------------------------------------------------
 
 # Copyright 2015 Stefan Heule
@@ -40,6 +45,12 @@ else
   SMARTLESS_HOLD_POLLUTE=1
 fi
 
+if command -v batcat > /dev/null; then
+  BATNAME="batcat"
+else
+  BATNAME="bat"
+fi
+
 # number of lines to directly display before entering the pager
 if [ -z "${SMARTLESS_NUM_LINES}" ] ; then
   # default to 5 lines less than the screen height, if it can be discovered
@@ -52,8 +63,8 @@ fi
 # the pager to be used
 [ -z "$SMARTLESS_PAGER" ] && SMARTLESS_PAGER='less'
 
-# the default arguments to the pager
-[ -z "$SMARTLESS_PAGER_ARGUMENTS" ] && SMARTLESS_PAGER_ARGUMENTS='-iR'
+# the default arguments to the pager, note -c means clear screen and start at top
+[ -z "$SMARTLESS_PAGER_ARGUMENTS" ] && SMARTLESS_PAGER_ARGUMENTS='-M -iR -K -x4 -c -~'
 
 # if a file name is passed, read it
 isfile=0
@@ -61,6 +72,7 @@ file=""
 args=()
 nextisarg=0
 haspattern=0
+wrap=1
 for var ; do
   if (( nextisarg == 1 )); then
     nextisarg=0
@@ -75,6 +87,10 @@ for var ; do
     if [[ $var == "-p" ]] ||
        [[ $var == "--pattern" ]]; then
       haspattern=1
+    fi
+    if [[ $var == "-S" ]] ||
+       [[ $var == "--chop-long-lines" ]]; then
+      wrap=0
     fi
     if [[ $var == "-b" ]] ||
        [[ $var == "-h" ]] ||
@@ -116,6 +132,7 @@ if (( isfile == 1 )); then
   # if LESSOPEN is defined then try to use it ...
   if [[ -n "$LESSOPEN" ]]; then
     lpcmd=$(echo $LESSOPEN | sed 's/ %s//' | sed 's/|-/|/' | sed 's/||/|/' | awk -F\| '{print $2}')
+    export FROM_ISFILE=1
     ${lpcmd} ${file} | "${BASH_SOURCE[0]}" "${args[@]}"
     exit $?
   else
@@ -144,12 +161,37 @@ n=0
 lines=
 newline=$'\n'
 
+cols="$(tput cols)"
+mchars=$((nlines * cols))
+nchars=0
+atlimit=0
+
 # read and display enough lines to fill most of the terminal (nlines many lines)
 while [ $n -lt "${nlines}" ] && IFS= read -r line; do
-  lines="${lines}${line}${newline}"
-  line=''
-  n=$((n + 1))
+    # replace tabs with spaces ...
+    #line2=${line//	/    }
+    line2=$(echo "${line}" | t2s)
+    lchars=$(echo ${line2} | wc -m)
+    lines="${lines}${line2}${newline}"
+    line=''
+    n=$((n + 1))
+    nchars=$((nchars + lchars))
+    if [[ $wrap -gt 0 && $nchars -ge $mchars ]]; then
+        atlimit=1
+        break
+    fi
 done
+
+if [[ -n "$FROM_GIT_LESS" ]]; then
+    export FROM_ISFILE=1
+fi
+
+#echo "nlines = $nlines"
+#echo "nchars = $nchars"
+#echo "mchars = $mchars"
+#echo "atlimit = $atlimit"
+#echo "ARGS = ${ARGS[@]}"
+#echo "FROM_ISFILE = ${FROM_ISFILE}"
 
 # For input with no trailing `\nEOF`
 # TODO: ComponentTest: `printf '1' | smartless`
@@ -157,14 +199,41 @@ if [ -n "${line}" ]; then
   lines="${lines}${line}"
 fi
 
+trap "if [[ $wrap -eq 0 ]] ; then printf '\033[?7h' ; fi" EXIT
+
 # if the input is longer, run the pager
-if IFS= read -r line; then
+if IFS= read -r line || [[ $atlimit -gt 0 ]]; then
+# {
+#   printf '%s' "${lines}"
+#   dont echo extra info ...
+#   printf '\033[38;5;2m... (more shown in %s)\033[0m\n' "${SMARTLESS_PAGER}"
+# } >&2
   {
-    printf '%s' "${lines}"
-    printf '\033[38;5;2m... (more shown in %s)\033[0m\n' "${SMARTLESS_PAGER}"
-  } >&2
-  { printf '%s%s\n' "${lines}" "${line}"; exec cat; } | exec "${SMARTLESS_PAGER}" "${SMARTLESS_PAGER_ARGUMENTS}" "${ARGS[@]}"
+  if [[ $wrap -eq 0 ]]; then
+      printf '\033[?7l'
+  fi
+  if [[ -n "$FROM_ISFILE" ]]; then
+    { printf '%s%s\n' "${lines}" "${line}" ; exec cat; } | "${SMARTLESS_PAGER}" -L "${SMARTLESS_PAGER_ARGUMENTS}" "${ARGS[@]}"
+  else
+    { printf '%s%s\n' "${lines}" "${line}" | $BATNAME -pp ; exec $BATNAME -pp; } | "${SMARTLESS_PAGER}" "${SMARTLESS_PAGER_ARGUMENTS}" "${ARGS[@]}"
+  fi
+  if [[ $wrap -eq 0 ]]; then
+      printf '\033[?7h'
+  fi
+  }
 else
   # TODO: ComponentTest: `printf '1\n2\n3' | smartless`
-  printf '%s' "${lines}"
+  {
+  if [[ $wrap -eq 0 ]]; then
+      printf '\033[?7l'
+  fi
+  if [[ -n "$FROM_ISFILE" ]]; then
+    printf '%s' "${lines}"
+  else
+    printf '%s' "${lines}" | $BATNAME -pp
+  fi
+  if [[ $wrap -eq 0 ]]; then
+      printf '\033[?7h'
+  fi
+  }
 fi
